@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>개구리밥 샘플 기록</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.0/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 16px; max-width: 100%; margin: auto; }
+    label { display: block; margin-top: 10px; font-weight: bold; }
+    input, textarea, select, button { width: 100%; padding: 10px; margin-top: 6px; font-size: 1rem; box-sizing: border-box; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 0.9rem; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; word-break: break-word; }
+    #delete-button, #downloadExcel, #refreshGPS, #printQR, #searchButton { margin-top: 10px; border: none; padding: 5px; border-radius: 5px; }
+    #delete-button { background-color: #f88; }
+    #downloadExcel { background-color: #88f; color: white; }
+    #refreshGPS { background-color: #8f8; }
+    #printQR { background-color: #555; color: white; }
+    .photo-preview { max-width: 100%; height: auto; margin-top: 10px; }
+
+    #detailModal {
+      display: none;
+      position: fixed;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      background: white;
+      z-index: 1001;
+      max-width: 90%;
+      max-height: 90%;
+      overflow-y: auto;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+    }
+
+    #overlay {
+      display: none;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background-color: rgba(0,0,0,0.5);
+      z-index: 1000;
+    }
+  </style>
+</head>
+<body>
+  <script>
+    if (sessionStorage.getItem('auth') !== 'yes') {
+      const pw = prompt('비밀번호를 입력하세요:');
+      if (pw !== '1234') {
+        alert('접근이 제한되었습니다.');
+        document.body.innerHTML = '';
+        throw new Error('Blocked');
+      } else {
+        sessionStorage.setItem('auth', 'yes');
+      }
+    }
+  </script>
+
+  <h1>개구리밥 샘플 기록</h1>
+  <div id="current-id" style="font-weight:bold; margin-bottom:10px;"></div>
+  <button id="delete-button" onclick="confirmDelete()">샘플 삭제</button>
+  <button id="downloadExcel" onclick="downloadExcel()">엑셀로 내보내기</button>
+  <button id="printQR" onclick="printQRCodes()">QR 스티커 인쇄</button>
+
+  <label style="margin-top: 20px;">샘플 ID: <span id="current-id-inline" style="font-weight:bold;"></span></label>
+
+  <label>GPS <button id="refreshGPS" onclick="getGPS()">GPS 새로고침</button></label>
+  <input id="latitude" placeholder="위도">
+  <input id="longitude" placeholder="경도">
+
+  <label>속 선택</label>
+  <select id="genus">
+    <option value="">선택하세요</option>
+    <option value="Spirodela">Spirodela</option>
+    <option value="Landoltia">Landoltia</option>
+    <option value="Lemna">Lemna</option>
+    <option value="Wolfiella">Wolfiella</option>
+    <option value="Wollfia">Wollfia</option>
+  </select>
+
+  <label>메모</label>
+  <textarea id="notes"></textarea>
+
+  <label>사진 업로드</label>
+  <input type="file" id="photo" accept="image/*">
+  <button onclick="saveSample()">샘플 저장</button>
+
+  <label>샘플 검색</label>
+  <input type="text" id="searchInput" placeholder="ID, 속명, 메모로 검색">
+  <button id="searchButton" onclick="renderTable()">검색</button>
+
+  <table id="sample-table">
+    <thead><tr><th>ID</th><th>날짜</th><th>속</th><th>상세</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <div id="detailModal">
+    <h2>샘플 상세 정보</h2>
+    <div id="detailContent"></div>
+    <div id="detailMap" style="margin-top:10px"></div>
+    <div id="detailQR"></div>
+    <div style="text-align:center; margin:10px 0"><button onclick="downloadPDF()">PDF 저장</button></div>
+    <button onclick="closeDetail()">닫기</button>
+  </div>
+  <div id="overlay" onclick="closeDetail()"></div>
+
+  <script>
+    let samples = JSON.parse(localStorage.getItem('samples') || '[]');
+    let idCounts = JSON.parse(localStorage.getItem('idCounts') || '{}');
+
+    function getTodayDateStr() {
+      const now = new Date();
+      return `${now.getFullYear().toString().slice(2)}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}`;
+    }
+
+    function getNextSampleId() {
+      const today = getTodayDateStr();
+      if (!idCounts[today]) idCounts[today] = 1;
+      return `${today}-${idCounts[today]}`;
+    }
+
+    function updateCurrentIdDisplay() {
+      const id = getNextSampleId();
+      document.getElementById('current-id').innerText = `샘플 ID: ${id}`;
+      const inline = document.getElementById('current-id-inline');
+      if (inline) inline.innerText = id;
+    }
+
+    function getGPS() {
+      if (!navigator.geolocation) {
+        alert("이 브라우저는 위치 정보 기능을 지원하지 않습니다.");
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          document.getElementById('latitude').value = position.coords.latitude.toFixed(6);
+          document.getElementById('longitude').value = position.coords.longitude.toFixed(6);
+        },
+        (error) => {
+          console.warn("위치 정보를 가져올 수 없습니다. 수동으로 입력해주세요.");
+        }
+      );
+    }
+
+    window.onload = () => {
+      updateCurrentIdDisplay();
+      getGPS();
+      renderTable();
+    };
+
+    function renderTable() {
+      const tbody = document.querySelector('#sample-table tbody');
+      tbody.innerHTML = '';
+      const keyword = document.getElementById('searchInput').value.toLowerCase();
+      samples.slice().reverse().filter(s => {
+        return !keyword ||
+          s.id.toLowerCase().includes(keyword) ||
+          (s.genus || '').toLowerCase().includes(keyword) ||
+          (s.notes || '').toLowerCase().includes(keyword);
+      }).forEach(s => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${s.id}</td><td>${s.timestamp}</td><td>${s.genus}</td><td><button onclick="showDetail('${s.id}')">보기</button></td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+   function printQRCodes() {
+  const qrWindow = window.open('', '', 'width=800,height=600');
+  const html = `
+    <html>
+    <head>
+      <title>QR 스티커</title>
+      <style>
+        body { font-family: sans-serif; text-align: center; }
+        .qr-block {
+          display: inline-block;
+          margin: 10px;
+          text-align: center;
+        }
+        .qr-label {
+          margin-top: 5px;
+          font-size: 14px;
+        }
+      </style>
+    </head>
+    <body>
+      ${samples.map(s => `
+        <div class="qr-block">
+          <div id="qr-${s.id}"></div>
+          <div class="qr-label">${s.id}</div>
+        </div>
+      `).join('')}
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js">"&lt;/script&gt;"
+      <script>
+        const samples = ${JSON.stringify(samples)};
+        samples.forEach(s => {
+          new QRCode(document.getElementById('qr-' + s.id), {
+            text: window.location.origin + '/view.html?id=' + s.id,
+            width: 100,
+            height: 100
+          });
+        });
+      <\\/script>
+    </body>
+    </html>
+  `;
+  qrWindow.document.open();
+  qrWindow.document.write(html);
+  qrWindow.document.close();
+}
+
+    function saveSample() {
+      const today = getTodayDateStr();
+      if (!idCounts[today]) idCounts[today] = 1;
+      const id = `${today}-${idCounts[today]++}`;
+      const file = document.getElementById('photo').files[0];
+      const sample = {
+        id,
+        timestamp: new Date().toLocaleString(),
+        latitude: document.getElementById('latitude').value,
+        longitude: document.getElementById('longitude').value,
+        genus: document.getElementById('genus').value,
+        notes: document.getElementById('notes').value,
+        photo: ''
+      };
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          sample.photo = reader.result || '';
+          finalizeSample(sample);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        finalizeSample(sample);
+      }
+    }
+
+    function finalizeSample(sample) {
+      samples.push(sample);
+      localStorage.setItem('samples', JSON.stringify(samples));
+      localStorage.setItem('idCounts', JSON.stringify(idCounts));
+      updateCurrentIdDisplay();
+      renderTable();
+      alert('샘플이 저장되었습니다!');
+    }
+
+    function showDetail(id) {
+      const s = samples.find(x => x.id === id);
+      if (!s) return;
+      document.getElementById('detailContent').innerHTML = `
+        <p><strong>샘플 ID:</strong> ${s.id}</p>
+        <p><strong>날짜:</strong> ${s.timestamp}</p>
+        <p><strong>위치:</strong> ${s.latitude}, ${s.longitude}</p>
+        <p><strong>속명:</strong> ${s.genus}</p>
+        <p><strong>메모:</strong><br><textarea rows="4" style="width:100%" onchange="updateMemo('${s.id}', this.value)">${s.notes || ''}</textarea></p>
+        ${s.photo ? `<img src="${s.photo}" class="photo-preview">` : ''}
+      `;
+      document.getElementById('detailMap').innerHTML = `<iframe width="100%" height="250" style="border:0" loading="lazy" allowfullscreen src="https://www.google.com/maps?q=${s.latitude},${s.longitude}&hl=ko&z=15&output=embed"></iframe>`;
+      document.getElementById('detailQR').innerHTML = '';
+      new QRCode(document.getElementById("detailQR"), {
+        text: window.location.origin + '/view.html?id=' + s.id,
+        width: 200,
+        height: 200
+      });
+      const qrLabel = document.createElement('div');
+      qrLabel.innerText = s.id;
+      document.getElementById('detailQR').appendChild(qrLabel);
+      document.getElementById('detailModal').style.display = 'block';
+      document.getElementById('overlay').style.display = 'block';
+    }
+
+    function updateMemo(id, newText) {
+      const s = samples.find(x => x.id === id);
+      if (s) {
+        s.notes = newText;
+        localStorage.setItem('samples', JSON.stringify(samples));
+      }
+    }
+
+    function closeDetail() {
+      document.getElementById('detailModal').style.display = 'none';
+      document.getElementById('overlay').style.display = 'none';
+    }
+
+    function confirmDelete() {
+      if (!samples.length) {
+        alert("삭제할 샘플이 없습니다.");
+        return;
+      }
+      const latestSample = samples[samples.length - 1];
+      if (confirm(`가장 최근 샘플 (${latestSample.id})을 삭제하시겠습니까?`)) {
+        samples.pop();
+        const today = getTodayDateStr();
+        idCounts[today] = Math.max((idCounts[today] || 1) - 1, 1);
+        localStorage.setItem('samples', JSON.stringify(samples));
+        localStorage.setItem('idCounts', JSON.stringify(idCounts));
+        updateCurrentIdDisplay();
+        renderTable();
+        alert("샘플이 삭제되었습니다.");
+      }
+    }
+
+    function downloadExcel() {
+      const wb = XLSX.utils.book_new();
+      const ws_data = [["ID", "날짜", "위도", "경도", "속", "메모"]];
+      samples.forEach(s => {
+        ws_data.push([s.id, s.timestamp, s.latitude, s.longitude, s.genus, s.notes]);
+      });
+      const ws = XLSX.utils.aoa_to_sheet(ws_data);
+      XLSX.utils.book_append_sheet(wb, ws, "Samples");
+      XLSX.writeFile(wb, "samples.xlsx");
+    }
+  </script>
+</body>
+</html>
